@@ -1,0 +1,8 @@
+__pycache__/*
+images/*
+the-eye.eu/*
+training_data/*
+*.jpg
+*.png
+*.parquet
+runs
