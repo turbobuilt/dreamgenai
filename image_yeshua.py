@@ -10,6 +10,42 @@ from img_preprocess_generative import TrainMode, Metadata, OutputType, text_leng
 import numpy as np
 from PIL import Image
 from torch.utils.tensorboard import SummaryWriter
+from deepspeed.ops.adam import FusedAdam as DeepSpeedCPUAdam
+from deepspeed import DeepSpeedEngine
+import time
+from trainer_complicated import TrainLinear, TrainLayer, TrainModel
+
+import deepspeed
+
+# Define the DeepSpeed configuration with ZeRO optimization
+ds_config = {
+    "train_batch_size": 1,  # Example, adjust based on your GPU memory and model size
+    "fp16": {
+        "enabled": True,  # Enable mixed precision training
+    },
+    # "zero_optimization": {
+    #     "stage": 2,  # Using ZeRO Stage 2 as an example, adjust as needed
+    #     "offload_optimizer": {
+    #         "device": "cpu",  # Offload optimizer state to CPU
+    #         "pin_memory": True
+    #     },
+    #     "allgather_partitions": True,
+    #     "allgather_bucket_size": 2e6,
+    #     "reduce_scatter": True,
+    #     "reduce_bucket_size": 2e6,
+    #     "overlap_comm": False,
+    #     "contiguous_gradients": True,
+    # },
+    "optimizer": {
+        "type": "OneBitAdam",
+        "params": {
+            "lr": 0.0001,
+            "betas": (0.9, 0.999),
+            "eps": 1e-8,
+            "weight_decay": 0.001,  # Adjust weight decay to your needs
+        }
+    }
+}
 
 
 device = torch.device("cuda:0")
@@ -28,44 +64,72 @@ checkpoint_dir = f"{model_name}/checkpoints"
 # ).to("cuda")
 device = torch.device("cuda")
 
+class Layer(TrainLayer):
+    def __init__(self, parent_model, in_dim, out_dim, kernel_size=4, activation=nn.functional.relu, add=False):
+        super(Layer, self).__init__(parent_model)
+        self.conv = nn.Conv1d(1, out_channels=kernel_size, kernel_size=kernel_size, stride=kernel_size, device=device, dtype=torch.bfloat16, bias=False)
+        self.linear = nn.Linear(in_dim, out_dim, device=device, dtype=torch.bfloat16, bias=False)
+        self.linear.weight.data.uniform_(-1, 1)  # Initializes weights with uniform random values between -1 and 1
 
-class Layer(nn.Module):
-    def __init__(self, in_dim, out_dim, kernel_size=4):
-        super(Layer, self).__init__()
-        self.conv = nn.Conv1d(1, out_channels=kernel_size, kernel_size=kernel_size, stride=kernel_size, device=device, dtype=torch.bfloat16)
-        self.linear = nn.Linear(in_dim, out_dim, device=device, dtype=torch.bfloat16)
+        self.activation = activation
+        self.add = add
 
+    # @torch.compile(mode="max-autotune")
     def forward(self, src):
+        original = src
         src = self.conv(src.reshape(src.shape[0], 1, src.shape[1]))
-        src = nn.functional.relu(src)
+        if self.activation is not None:
+            src = self.activation(src)
+        # src = src.tanh()
         src = self.linear(src.reshape(src.shape[0], -1))
-        src = nn.functional.relu(src)
-        return src
+        if self.activation is not None:
+            src = self.activation(src)
+        # return src.clamp(-1,1)
+        # return src.tanh()
+        # if self.add:
+        #     src = src + original
+        # return src
+        return src # src.clamp(-1,1)
+    
+
+class SigmoidOut(TrainLayer):
+    def __init__(self, parent_model, in_dim, out_dim):
+        super(SigmoidOut, self).__init__(parent_model)
+        self.linear = nn.Linear(in_dim, out_dim, device=device, dtype=torch.bfloat16, bias=False),
+        self.sigmoid = nn.Sigmoid()
+        
+    # @torch.compile(mode="max-autotune")
+    def forward(self, src):
+        return self.sigmoid(self.linear(src))
 
 class Model(nn.Module):
     def __init__(self):
         super(Model, self).__init__()
-        self.input_layers = nn.Sequential(*[Layer(image_dim**2*3+text_length,image_dim**2*3+text_length) for _ in range(25)])
-        self.input_to_main = nn.Linear(image_dim**2*3+text_length, 1024, device=device, dtype=torch.bfloat16)
-        self.main_layers = nn.Sequential(*[Layer(1024, 1024) for _ in range(250)])
-        # self.image_in = nn.Sequential(*[Layer(image_dim**2*3,image_dim**2*3) for _ in range(25)])
+        self.input_layers = nn.Sequential(*[Layer(self, image_dim**2*3+text_length,image_dim**2*3+text_length,add=True) for _ in range(3)])
+        self.input_layers_2 = nn.Sequential(
+            Layer(self, image_dim**2*3+text_length, image_dim**2+text_length),
+            *[Layer(self, image_dim**2+text_length, image_dim**2+text_length, add=True) for _ in range(25)],
+            nn.Linear(image_dim**2+text_length, 1024, device=device, dtype=torch.bfloat16, bias=False)
+        )
+        # self.input_to_main = 
+        self.main_layers = nn.Sequential(*[Layer(self, 1024, 1024,add=True) for _ in range(5)]) #250
+        # self.image_in = nn.Sequential(*[Layer(self, image_dim**2*3,image_dim**2*3) for _ in range(25)])
         self.image_out = nn.Sequential(
-            Layer(1024, img_output_shape**2*3*32),
-            *[Layer(img_output_shape**2*3*32,img_output_shape**2*3*32) for _ in range(25)], 
-            Layer(img_output_shape**2*3*32,img_output_shape**2*3),
-            nn.Linear(img_output_shape**2*3,img_output_shape**2*3, device=device, dtype=torch.bfloat16),
-            nn.Sigmoid()
+            Layer(self, 1024, img_output_shape**2*3*32),
+            *[Layer(self, img_output_shape**2*3*32,img_output_shape**2*3*32,add=True) for _ in range(5)], #25
+            Layer(self, img_output_shape**2*3*32,img_output_shape**2*3),
+            SigmoidOut(self, img_output_shape**2*3,img_output_shape**2*3)
         )
 
         text_out_shape=4
-        # self.text_in = nn.Sequential(*[Layer(text_length, text_length) for _ in range(25)])
+        # self.text_in = nn.Sequential(*[Layer(self, text_length, text_length) for _ in range(25)])
         self.text_out = nn.Sequential(
-            Layer(1024,text_out_shape*32),
-            *[Layer(text_out_shape*32,text_out_shape*32) for _ in range(25)], 
-            Layer(text_out_shape*32,text_out_shape*128)
+            Layer(self, 1024,text_out_shape*32),
+            *[Layer(self, text_out_shape*32,text_out_shape*32) for _ in range(25)], 
+            Layer(self, text_out_shape*32,text_out_shape*128)
         )
-    
-    def forward(self, output_type: OutputType, src): # text_input=None, image_input=None):
+    # @torch.compile(mode="reduce-overhead")
+    def forward(self, output_type: OutputType, src, example_index=None): # text_input=None, image_input=None):
         # if text_input is not None:
         #     text_input = self.text_in(src)
         # else:
@@ -78,7 +142,10 @@ class Model(nn.Module):
 
         # src = torch.cat([image_input, text_input], dim=-1)
         src = self.input_layers(src)
-        src = self.input_to_main(src)
+        src = self.input_layers_2(src)
+        if example_index == 4:
+            print("out 2", src[0])
+        # src = self.input_to_main(src)
 
         src = self.main_layers(src)
 
@@ -98,8 +165,29 @@ if __name__ == "__main__":
     total_steps = 0
 
     model = Model().to(device)
+    print(">>>>>>>>>>>>>>>>>>>>>>DONE")
+    # model, optimizer, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
     print(sum(p.numel() for p in model.parameters() if p.requires_grad))
-    optimizer = torch.optim.SGD(model.parameters(), lr=.01)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0, foreach=False)
+    lr = 0
+    target_lr = .000001
+    # optimizer_dict = {p: torch.optim.Adam([p], foreach=False) for p in model.parameters()}
+    # def optimizer_hook(parameter) -> None:
+    #     optimizer_dict[parameter].step()
+    #     optimizer_dict[parameter].zero_grad()
+    # for p in model.parameters():
+    #     p.register_post_accumulate_grad_hook(optimizer_hook)
+
+    def set_lr(lr):
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        # for key in optimizer_dict:
+        #     for param_group in optimizer_dict[key].param_groups:
+        #         param_group['lr'] = lr
+
+        # Register the hook onto every parameter
+
+
     loss_function_text = nn.CrossEntropyLoss()
     loss_function_image = nn.MSELoss()
     writer = SummaryWriter(log_dir=f"runs/{model_name}_128_.0001", flush_secs=10)
@@ -111,21 +199,16 @@ if __name__ == "__main__":
         test_x = torch.cat([torch.full((test_x.shape[0], text_length), -1, dtype=torch.bfloat16), test_x], dim=-1)
         break
 
-
-
     # read from save_files and load most recent
     list_of_files = glob.glob(f"{checkpoint_dir}/*")
     if len(list_of_files) > 0:
         latest_file = max(list_of_files, key=os.path.getctime)
         print(f"loading from {latest_file}")
-        checkpoint = torch.load(latest_file)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        epoch = checkpoint['epoch']
-        example_index = checkpoint['example_index']
-        loss = checkpoint['loss']
-        total_steps = checkpoint['total_steps']
-        print(f"loaded epoch: {epoch} example_index: {example_index} loss: {loss}")
+        load_path, client_state = model.load_checkpoint(latest_file)
+        epoch = client_state['epoch']
+        example_index = client_state['example_index']
+        total_steps = client_state['total_steps']
+        print(f"loaded epoch: {epoch} example_index: {example_index} total_steps: {total_steps}")
 
     for epoch in range(epoch, 40):
         dataset = ImageDatasetInfill() # MultiDataset()
@@ -135,6 +218,15 @@ if __name__ == "__main__":
             x = test_x.clone()
             y = test_y.clone()
             metadata = test_metadata
+
+            new_lr = target_lr * .95**(total_steps // 100000)
+            if lr != new_lr:
+                print("setting lr", new_lr)
+                lr = new_lr
+                set_lr(new_lr)
+                # for param_group in optimizer.param_groups:
+                #     param_group['lr'] = lr
+
 
 
             # if x.shape[1] == text_length:
@@ -146,27 +238,27 @@ if __name__ == "__main__":
             x = x.bfloat16().to(device)
             y = y.bfloat16().to(device)
 
-            optimizer.zero_grad()
+            # optimizer.zero_grad()
 
 
-            # if example_index % 500 == 0 or example_index % 500 == 1:
-            #     if metadata.output_type == OutputType.image_only:
-            #         print("outputting")
-            #         image = test_x[-1,512:].reshape(image_dim, image_dim, 3)
-            #         img_array = image.int().numpy().astype(np.uint8)
-            #         Image.fromarray(img_array).save("test_out/main.png")
-            #         for example_part_index in range(test_x.shape[0]):
-            #             with torch.no_grad():
-            #                 # with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-            #                 prediction = model(OutputType.image_only, test_x[example_part_index:example_part_index+1].to(device))
-            #                 prediction = prediction.reshape(img_output_shape,img_output_shape,3)*255
-            #                 prediction = prediction.cpu().int().numpy().astype(np.uint8)
-            #                 Image.fromarray(prediction).save(f"test_out/{example_part_index}.png")
+            if example_index % 10 == 0 or example_index % 10 == 1:
+                if metadata.output_type == OutputType.image_only:
+                    print("outputting")
+                    image = test_x[-1,512:].reshape(image_dim, image_dim, 3)
+                    img_array = image.int().numpy().astype(np.uint8)
+                    Image.fromarray(img_array).save("test_out/main.png")
+                    for example_part_index in range(test_x.shape[0]):
+                        with torch.no_grad():
+                            # with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                            prediction = model(OutputType.image_only, test_x[example_part_index:example_part_index+1].to(device), example_index=example_part_index)
+                            prediction = prediction.reshape(img_output_shape,img_output_shape,3)*255
+                            prediction = prediction.cpu().int().numpy().astype(np.uint8)
+                            Image.fromarray(prediction).save(f"test_out/{example_part_index}.png")
 
-            #                 target= test_y[example_part_index:example_part_index+1]
-            #                 target = target.reshape(img_output_shape,img_output_shape,3)*255
-            #                 target = target.cpu().int().numpy().astype(np.uint8)
-            #                 Image.fromarray(target).save(f"test_out/{example_part_index}_target.png")
+                            target= test_y[example_part_index:example_part_index+1]
+                            target = target.reshape(img_output_shape,img_output_shape,3)*255
+                            target = target.cpu().int().numpy().astype(np.uint8)
+                            Image.fromarray(target).save(f"test_out/{example_part_index}_target.png")
             # exit()
 
             loss_function = loss_function_image
@@ -175,15 +267,25 @@ if __name__ == "__main__":
 
             for batch_item_index in range(x.shape[0]):
                 optimizer.zero_grad()
+                start = time.time()
                 prediction = model(metadata.output_type, x[batch_item_index:batch_item_index+1])
                 # print(prediction.shape)
                 # exit()
+
+                # for param_group in optimizer.param_groups:
+                #     # param_group['lr'] = lr
+                #     print(param_group['lr'])
                 loss = loss_function(prediction, y[batch_item_index:batch_item_index+1])
-                if batch_item_index % 30 == 0:
-                    print("batch_item_index", batch_item_index, loss.item())
-                    print("output", prediction[0,0], prediction.shape,"target", y[batch_item_index:batch_item_index+1,0])
+                if batch_item_index % 100 == 0:
+                    print("total steps", total_steps, "batch_item_index", batch_item_index, "loss", loss.item())
+                    print("output", prediction[0,0,0], prediction.shape)
+                    print("target", y[batch_item_index:batch_item_index+1,0,0])
+                    writer.add_scalar("main_loss", loss.float().item(), total_steps)
+                    writer.add_scalar("min", torch.min(prediction).float(), total_steps)
+                    writer.add_scalar("max", torch.max(prediction).float(), total_steps)
                 loss.backward()
                 optimizer.step()
+                # print(time.time() - start)
 
             if example_index % 500 == 0 and False:
                 print(f"epoch: {example_index} Loss: {loss.item()}")
@@ -203,13 +305,18 @@ if __name__ == "__main__":
             
             # save every 100,000 examples, include epoch and example_index in save file
             if example_index % 100000 == 0 and example_index > 0 and False:
-                torch.save({
-                    'epoch': epoch,
-                    'example_index': example_index,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': loss,
-                    'total_steps': total_steps
-                }, f"{checkpoint_dir}/epoch_{epoch}_example_{example_index}.pt")
+                print("not saving expoch")
+                # model.save_checkpoint(f"{checkpoint_dir}/{total_steps}_epoch_{epoch}_example_{example_index}.pt", client_state={
+                #     'epoch': epoch,
+                #     'example_index': example_index,
+                #     'total_steps': total_steps
+                # })
+                # torch.save({
+                #     'epoch': epoch,
+                #     'example_index': example_index,
+                #     'model_state_dict': model.state_dict(),
+                #     'optimizer_state_dict': optimizer.state_dict(),
+                #     'total_steps': total_steps
+                # }, f"{checkpoint_dir}/epoch_{epoch}_example_{example_index}.pt")
 
 

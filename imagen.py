@@ -39,7 +39,7 @@ class Model(nn.Module):
         self.text_linear = nn.Linear(512, 4*128)
 
     
-    def forward(self, text_input=None, image_input=None, output_type):
+    def forward(self, text_input=None, image_input=None):
         if text_input is not None:
             src = self.text_in_transformer(src)
         elif output_type == "i":
@@ -61,26 +61,26 @@ class Model(nn.Module):
 
 
 
-model = Model()
-dataset = ImageDatasetInfill()
-optimizer = torch.optim.Adam(params=model.parameters(), lr=.0001)
-loss_function = nn.MSELoss()
-for index, example in enumerate(dataset):
-    x, y = example
-    x = x.to("cuda")
-    y = y.to("cuda")
+# model = Model()
+# dataset = ImageDatasetInfill()
+# optimizer = torch.optim.Adam(params=model.parameters(), lr=.0001)
+# loss_function = nn.MSELoss()
+# for index, example in enumerate(dataset):
+#     x, y = example
+#     x = x.to("cuda")
+#     y = y.to("cuda")
 
-    optimizer.zero_grad()
-    with torch.cuda.amp.autocast_mode.autocast(dtype=torch.bfloat16):
-        out = model(x)
-        loss = loss_function(out, y)
-        loss.backward()
+#     optimizer.zero_grad()
+#     with torch.cuda.amp.autocast_mode.autocast(dtype=torch.bfloat16):
+#         out = model(x)
+#         loss = loss_function(out, y)
+#         loss.backward()
 
-    if index % 1 == 0:
-        print(index, loss.item())
-        print(x.shape, y.shape)
+#     if index % 1 == 0:
+#         print(index, loss.item())
+#         print(x.shape, y.shape)
     
-    optimizer.step()
+#     optimizer.step()
 
 
 
@@ -88,7 +88,7 @@ for index, example in enumerate(dataset):
 
 
 
-exit()
+# exit()
 epoch = 0
 example_index = 0
 total_steps = 0
