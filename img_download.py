@@ -60,7 +60,7 @@ async def download_files():
         shutil.rmtree(oldest_dir)
 
     # print first 20 rows
-    for i in range(20):
+    for i in range(500):
         # print all cols
         print(df.iloc[i])
         await download_file(df, i)

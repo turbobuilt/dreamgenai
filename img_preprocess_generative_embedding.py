@@ -21,12 +21,13 @@ class OutputType(enum.Enum):
     text_only=1
     image_only=2
 
-image_dim = 64
-img_output_shape=8
+image_dim = 128
+img_output_shape=16
 text_length=1024
 
 def encode_image_description(data, max_length=text_length):
     data = data.encode("ascii", "ignore").decode("ascii")[:max_length]
+    return data
     data = torch.tensor([ord(c) for c in data], dtype=torch.long)
     data = torch.nn.functional.pad(data, (0, max_length - data.size(0)), "constant", 0)
     return data.reshape(1, text_length)
@@ -74,10 +75,10 @@ class ImageDatasetGenerative(Dataset):
     
     def __getitem__(self, idx):
         try:
-            image_dir = self.image_dirs[idx]
+            image_dir = self.image_dirs[idx % (len(self.image_dirs)-1)]
             with open(f"{image_dir}/info.json", "r") as f:
                 info = json.load(f)
-            image = Image.open(f"{image_dir}/image.jpg")
+            image = Image.open(f"{image_dir}/image.jpg").resize((image_dim,image_dim))
             img_numpy = np.array(image).astype(np.int32)
 
             description = encode_image_description(info["TEXT"])
@@ -98,18 +99,20 @@ class ImageDatasetGenerative(Dataset):
                 for x in range(img_numpy.shape[1]-img_output_shape, -1, -img_output_shape):
                     out.append(torch.tensor(img_numpy[y:y+img_output_shape, x:x+img_output_shape,:]))
                     img_numpy[y:y+img_output_shape, x:x+img_output_shape,:] = -1
-                    input_image = torch.tensor(img_numpy.copy().reshape(-1, text_length))
+                    input_image = torch.tensor(img_numpy.copy())
                     input_images.append(input_image)
+
             input_images.reverse()
             out.reverse()
+            return metadata, (torch.stack(input_images), description), torch.stack(out)
 
-            input_data = []
-            for i in range(len(input_images)):
-                input_data.append(torch.concat([metadata, description, input_images[i]], dim=0))
+            # input_image_data = []
+            # for i in range(len(input_images)):
+            #     input_data.append([metadata, description, input_images[i]])
 
-            input_data_stack = torch.stack(input_data)
+            # input_data_stack = torch.stack(input_data)
             
-            return input_data_stack, torch.stack(out)
+            # return input_data_stack, torch.stack(out)
         except Exception as e:
             raise e
         
@@ -122,11 +125,13 @@ if __name__ == "__main__":
     dataset = ImageDatasetGenerative()
     # print first 2
     for i in range(1):
-        x, y = dataset[i]
+        metadata, x, y = dataset[i]
         files = glob.glob("training_data/*")
         for file in files:
             os.remove(file)
         for step in range(image_dim // 16 * (image_dim // 16)):
-            img = x[step,4:].reshape(image_dim,image_dim,3)
+            images, description = x
+            print(images.shape, y.shape)
+            img = x[0][step].reshape(image_dim,image_dim,3)
             print_image(img).save(f"training_data/{step}_in.png")
             print_image(y[step]).save(f"training_data/{step}_out.png")

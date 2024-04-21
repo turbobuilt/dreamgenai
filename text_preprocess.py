@@ -30,13 +30,14 @@ def preprocess_file(example):
             else:
                 input_data.append(0)
         torch_input_data = torch.tensor(input_data, dtype=torch.float32)
-
         output_data = [ord(data[index + x]) for x in range(output_length)]
         torch_output_data = torch.tensor(output_data, dtype=torch.long)
         all_in.append(torch_input_data)
         all_out.append(torch_output_data)
     x = torch.stack(all_in)
+    # x = x.flip(-1)
     y = torch.stack(all_out)
+    # y = y.flip(-1)
     y = torch.nn.functional.one_hot(y, 128)
     return x.reshape(x.shape[0],x.shape[1]).float(), y
 
@@ -61,7 +62,7 @@ class ArticleDataset():
             example = next(self.iterator)
             x, y = preprocess_file(example)
 
-            metadata = Metadata(TrainMode.text_only, OutputType.image_only)
+            metadata = Metadata(TrainMode.text_only, OutputType.text_only)
             if x is None:
                 self.try_count += 1
                 return self.__next__()
@@ -78,7 +79,13 @@ class ArticleDataset():
 if __name__ == "__main__":
     dataset = ArticleDataset()
     i = 0
-    for example in dataset:
+    for metadata, x, y in dataset:
         i += 1
-        print(example[1].shape, example[2].shape)
+        print("X is")
+        for j in range(5):
+            print("j:", j, "".join([chr(val) for val in x[j].int()]))
+        print("Y is")
+        for j in range(5):
+            print("j:", j, "".join([chr(val) for val in y[j].argmax(-1).int()]))
+        print(x.shape, y.shape)
         break

@@ -20,16 +20,17 @@ class LayerInput():
 
 class TrainModel():
     def __init__(self):
+        self.layer_history = []
         self.reset_layer_history()
 
     def reset_layer_history(self):
         self.layer_history = []
 
-    def backward(self, target):
-        self.reset_layer_history()
+    def backward(self, target, is_first):
         self.layer_history[-1].output.copy_(target)
         for layer_index in range(len(self.layer_history)-1, -1, -1):
-            self.layer_history[layer_index].learn()
+            print("training  layer ", layer_index, "of", len(self.layer_history))
+            self.layer_history[layer_index].learn(is_first=is_first)
 
 
 class TrainLayer(nn.Module):
@@ -68,7 +69,8 @@ class TrainLayer(nn.Module):
         self.parent_model.layer_history.append(self)
         return self.output
     
-    def learn(self):
+    def learn(self, is_first=False):
+        print("is first", is_first)
         self.to(device)
         params = []
         inputs_temp: List[torch.Tensor] = []
@@ -78,6 +80,8 @@ class TrainLayer(nn.Module):
                 if not hasattr(input_item, "layer_index"):
                     print("No layer index!")
                     exit()
+                if is_first:
+                    input_item.copy_(torch.rand_like(input_item))
                 inputs_temp.append(input_item.detach().to(device))
                 inputs_temp[-1].detach_()
                 inputs_temp[-1].requires_grad_(True)
@@ -86,7 +90,8 @@ class TrainLayer(nn.Module):
                 inputs_temp.append(input_item)
         params.append({ 'params': self.parameters(), 'lr': start_lr })
         optimizer = torch.optim.AdamW(params)
-        criterion = nn.L1Loss()
+        # print("params", params)
+        criterion = nn.MSELoss()
         # print("target", self.output)
         # print("inputs before", self.input_data)
         temp_output: torch.Tensor = self.output.to(device)
@@ -96,22 +101,38 @@ class TrainLayer(nn.Module):
                 param_group['lr'] *= value
             return value*current_lr
         previous_loss = 100
-        for i in range(1000):
+        # print("inputs", inputs_temp, "output", temp_output)
+        for i in range(100000):
             optimizer.zero_grad()
             
             out = self.forward(*inputs_temp)
             loss = criterion(out, temp_output)
-            if i % 10 == 0:
+            if i % 100 == 0:
                 print("loss is", loss.item(), "current lr", current_lr) #, "temp output", temp_output, "out", out, "in ", *inputs_temp)
+                # print("input", inputs_temp[0][0,0].item(), "output", out[0,0,0], "target", temp_output[0,0,0])
             loss.backward()
+            # for param_group in optimizer.param_groups:
+            #     for param in param_group['params']: 
+            #         # print(param.grad)
+            #         param.grad = param.grad*param.grad.abs().pow(.5)
+            # print()
             optimizer.step()
-            if loss.item() < previous_loss:
-                current_lr = multiply_lr(1.01)
-                print("increasing lr")
-            else:
-                current_lr = multiply_lr(.95)
-                if current_lr < start_lr*.1:
-                    print("reducing lr", )
+            current_lr = loss.item()*.001
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = current_lr
+            # return value*current_lr
+            # for param_group in optimizer.param_groups:
+            #     for param in param_group['params']: 
+            #         param.grad = current_lr
+
+            # if loss.item() < previous_loss:
+            #     current_lr = multiply_lr(1.01)
+            #     # print("increasing lr")
+            # else:
+            #     current_lr = multiply_lr(.95)
+            #     # if current_lr < start_lr*.1:
+            #     #     # print("reducing lr", )
+
             previous_loss = loss.item()
 
         print(loss.item())
@@ -132,7 +153,7 @@ class TrainLayer(nn.Module):
 
 class TrainLinear(TrainLayer):
     def __init__(self, parent_model, num_inputs, num_outputs, activation=True):
-        super(TrainLinear, self).__init__(parent_model)
+        super().__init__(parent_model)
         layers = []
         if activation:
             layers.append(Sine())
@@ -147,7 +168,7 @@ class TrainLinear(TrainLayer):
 
 class MyModel(TrainModel):
     def __init__(self):
-        super(TrainModel, self).__init__()
+        super().__init__()
         self.layers = [
             TrainLinear(self, 10,10, activation=False),
             TrainLinear(self, 10,10),
@@ -181,11 +202,12 @@ class MyModel(TrainModel):
 if __name__ == "__main__":
     model = MyModel()
 
-    x = torch.arange(0,20, dtype=torch.float).reshape(2,10)
-    y = torch.arange(0,20, dtype=torch.float).flip(dims=[-1]).reshape(2,10)
+    x = torch.arange(0, 20, dtype=torch.float).reshape(2,10)
+    y = torch.arange(0, 20, dtype=torch.float).flip(dims=[-1]).reshape(2,10)
     import time
     for i in range(20):
         start = time.time()
+        model.reset_layer_history()
         out = model.forward(x)
 
         model.backward(y)
