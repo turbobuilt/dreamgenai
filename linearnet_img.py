@@ -21,7 +21,7 @@ class OutputType(enum.Enum):
     text_only=1
     image_only=2
 
-image_dim = 128
+image_dim = 64
 img_output_shape=16
 text_length=1024
 
@@ -79,42 +79,16 @@ class ImageDatasetGenerative(Dataset):
             with open(f"{image_dir}/info.json", "r") as f:
                 info = json.load(f)
             image = Image.open(f"{image_dir}/image.jpg").resize((image_dim,image_dim))
-            img_numpy = np.array(image).astype(np.int32)
-
+            img_numpy = np.array(image).astype(np.int32) / 255
             description = encode_image_description(info["TEXT"])
-            # img_width = info["content_width"]
-            # img_height = info["content_height"]
-            metadata = Metadata(
-                TrainMode.create_image, 
-                OutputType.image_only,
-                img_width=image_dim, 
-                img_height=image_dim, 
-                # inset_image_width=img_width,
-                # inset_image_height=img_height
-            )
-            
-            out = []
-            input_images = []
-            for y in range(img_numpy.shape[0]-img_output_shape, -1, -img_output_shape):
-                for x in range(img_numpy.shape[1]-img_output_shape, -1, -img_output_shape):
-                    out.append(torch.tensor(img_numpy[y:y+img_output_shape, x:x+img_output_shape,:]))
-                    img_numpy[y:y+img_output_shape, x:x+img_output_shape,:] = -1
-                    input_image = torch.tensor(img_numpy.copy())
-                    input_images.append(input_image)
-
-            input_images.reverse()
-            out.reverse()
-            return metadata, (torch.stack(input_images), description), torch.stack(out)
-
-            # input_image_data = []
-            # for i in range(len(input_images)):
-            #     input_data.append([metadata, description, input_images[i]])
-
-            # input_data_stack = torch.stack(input_data)
-            
-            # return input_data_stack, torch.stack(out)
+            return description, img_numpy
         except Exception as e:
-            print("error getting image", e)
+            # self.image_dirs.remove(image_dir)
+            # os.remove(f"{image_dir}")
+            # import traceback
+            # print(traceback.format_exc())
+            # print("error getting image", idx, f"{image_dir}/image.jpg",  e)
+            
             return None
         
 def print_image(img):

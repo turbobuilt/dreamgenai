@@ -8,9 +8,11 @@ import shutil
 import os
 import io
 
-table = pq.read_table('/home/c/prj/dreamgenai/the-eye.eu/public/AI/cah/laion400m-met-release/laion400m-meta/part-00001-5b54c5d5-bbcf-484d-a2ce-0d6f73df1a36-c000.snappy.parquet')
+# table = pq.read_table('/home/c/prj/dreamgenai/the-eye.eu/public/AI/cah/laion400m-met-release/laion400m-meta/part-00001-5b54c5d5-bbcf-484d-a2ce-0d6f73df1a36-c000.snappy.parquet')
+table = pq.read_table('/home/c/prj/dreamgenai/train.parquet?download=true')
 df = table.to_pandas()
 
+df.head()
 
 
 async def download_file(df, i):

@@ -1,17 +1,17 @@
 import torch
 from img_preprocess_infill import ImageDatasetInfill
-from mamba_ssm import Mamba
-import pyarrow.parquet as pq
+# from mamba_ssm import Mamba
+# import pyarrow.parquet as pq
 import os
 import glob
 from torch import nn
 from data_preprocess import MultiDataset
-from img_preprocess_generative_embedding import ImageDatasetGenerative, TrainMode, Metadata, OutputType, text_length, img_output_shape, image_dim
+from img_preprocess_generative_embedding_small import ImageDatasetGenerative, TrainMode, Metadata, OutputType, text_length
 import numpy as np
 from PIL import Image
 from torch.utils.tensorboard import SummaryWriter
-from deepspeed.ops.adam import FusedAdam as DeepSpeedCPUAdam
-from deepspeed import DeepSpeedEngine
+# from deepspeed.ops.adam import FusedAdam as DeepSpeedCPUAdam
+# from deepspeed import DeepSpeedEngine
 import time
 from trainer_complicated import TrainLinear, TrainLayer, TrainModel
 from text_preprocess import ArticleDataset
@@ -19,13 +19,14 @@ from get_embedding import embedding_model
 import torch.nn.functional as F
 from squarenet import SquareNet, SquareNetHighMemory
 
-import deepspeed
+# import deepspeed
 
 
 device = torch.device("cuda:0")
-model_name = "imagen_yeshua"
+model_name = "imagen_yeshua_small"
 out_dir = f"{model_name}/samples"
 checkpoint_dir = f"{model_name}/checkpoints"
+learning_rate=0.0001
 
 if not os.path.exists(model_name):
     os.mkdir(model_name)
@@ -42,10 +43,8 @@ class LinearWithActivation(nn.Module):
         self.linear = nn.Linear(in_features, out_features=out_features, dtype=dtype)
         self.norm = nn.LayerNorm(out_features, dtype=dtype)
     
-    def forward(self, src, original=None):
-        if original == None:
-            original = 0
-        return self.norm(F.relu(self.linear(src))+original)
+    def forward(self, src):
+        return self.norm(F.relu(self.linear(src)))
     
 class ImagePreprocessLayerGroup(nn.Module):
     def __init__(self, in_dim, in_channels, out_channels=None, n_layers=4):
@@ -64,9 +63,8 @@ class ImagePreprocessLayerGroup(nn.Module):
         
     def forward(self, src):
         src = self.layers[1](F.relu(self.layers[0](src)))
-        original = src.clone()
         for i in range(2, len(self.layers)-2, 2):
-            src = self.layers[i+1](F.relu(self.layers[i](src)) + original)
+            src = self.layers[i+1](F.relu(self.layers[i](src)))
         src = self.layers[-1](self.layers[-2](src))
         return src
 
@@ -79,16 +77,28 @@ class Model(nn.Module):
         self.text_embedding_dim=1024
         self.text_in = nn.ModuleList([
             LinearWithActivation(self.text_embedding_dim, self.text_embedding_dim*4),
-            *[LinearWithActivation(self.text_embedding_dim*4, self.text_embedding_dim*4) for _ in range(15)],
+            *[LinearWithActivation(self.text_embedding_dim*4, self.text_embedding_dim*4) for _ in range(5)],
             nn.Linear(self.text_embedding_dim*4, self.text_embedding_dim, dtype=torch.bfloat16),
         ])
         dim = image_dim // 2
         self.master_layers = nn.ModuleList([
-            # *[SquareNetHighMemory(dim*dim*64+1024, i, device=device) for i in range(5)],
-            *[SquareNet(dim*dim*64+1024, device=device) for i in range(125)]
+            *[SquareNetHighMemory(dim*dim*64+1024, i, device=device) for i in range(5)],
+            # *[SquareNet(dim*dim*64+1024, device=device) for i in range(125)]
         ])
 
-        self.out_layer = nn.Linear(dim*dim*64+1024, img_output_shape*img_output_shape*3, dtype=torch.bfloat16)
+        decoder_dims = (dim*dim*64+1024) / img_output_shape**2
+        decoder_dims = (dim*dim*64+1024) // img_output_shape**2
+        self.decoder = nn.Sequential(
+            nn.Linear(decoder_dims, decoder_dims, dtype=torch.bfloat16, device=device),
+            nn.ReLU(),
+            nn.LayerNorm(decoder_dims, dtype=torch.bfloat16, device=device),
+            nn.Linear(decoder_dims, decoder_dims, dtype=torch.bfloat16, device=device),
+            nn.ReLU(),
+            nn.LayerNorm(decoder_dims, dtype=torch.bfloat16, device=device),
+            nn.Linear(decoder_dims, 3, dtype=torch.bfloat16, device=device)
+        )
+
+        # self.out_layer = nn.Linear(dim*dim*64+1024, img_output_shape*img_output_shape*3, dtype=torch.bfloat16)
 
     # @torch.compile(mode="reduce-overhead")
     def forward(self, image_input, text_input):
@@ -97,24 +107,23 @@ class Model(nn.Module):
 
         text_input = torch.tensor(text_input).bfloat16().to(device).reshape(image_input.shape[0], -1)
         text_input = self.text_in[0](text_input)
-        original = text_input.clone()
         for layer_index in range(1, len(self.text_in)-1):
-            text_input = self.text_in[layer_index](text_input, original)
+            text_input = self.text_in[layer_index](text_input)
         text_input = self.text_in[-1](text_input)
         image_input = image_input.permute(0,3,1,2)
         image_input = self.image_in(image_input).reshape(image_input.shape[0], -1)
         src = torch.cat([image_input, text_input], dim=-1).reshape(image_input.shape[0], -1)
-        original = src.clone()
         for layer in self.master_layers:
-            src = layer(src) + original
-            # original = original + src
-        return self.out_layer(src).reshape(src.shape[0], img_output_shape, img_output_shape, 3)
+            src = layer(src)
+        src = src.reshape(src.shape[0], img_output_shape**2, -1)
+        src = self.decoder(src)
+        return src.reshape(src.shape[0], img_output_shape, img_output_shape, 3)
 
 torch.set_float32_matmul_precision('high')
 if __name__ == "__main__":
 
     model = Model().to(device)
-    optimizer = torch.optim.Adam(params=model.parameters(), lr=0.0001)
+    optimizer = torch.optim.Adam(params=model.parameters(), lr=learning_rate)
 
     checkpoints_sorted = glob.glob(f'{checkpoint_dir}/*.pt')
     if len(checkpoints_sorted) > 0:
@@ -133,7 +142,7 @@ if __name__ == "__main__":
     print("num trainable params is", params)
 
     loss_function_text = nn.CrossEntropyLoss()
-    loss_function_image = nn.MSELoss()
+    loss_function_image = nn.L1Loss()
     writer = SummaryWriter(log_dir=f"runs/{model_name}_128_.0001", flush_secs=10)
 
     dataset = ImageDatasetGenerative() # ImageDatasetInfill()
@@ -148,9 +157,9 @@ if __name__ == "__main__":
         if sample_info is None:
             continue
         metadata, x_all, y = sample_info
-        x_img = x_all[0].bfloat16().to(device)
+        x_img = x_all[0].bfloat16().to(device) / 255
         x_text = x_all[1]
-        y = y.bfloat16().to(device)
+        y = y.bfloat16().to(device) / 255
 
         if total_steps % 25 == 0 and total_steps > 0:
             print("doing example")
@@ -163,12 +172,12 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     # with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                     prediction = model(x_img[example_part_index:example_part_index+1].to(device),x_text)
-                    prediction = prediction.reshape(img_output_shape,img_output_shape,3)
+                    prediction = prediction.reshape(img_output_shape,img_output_shape,3)*255
                     prediction = prediction.cpu().int().numpy().astype(np.uint8)
                     Image.fromarray(prediction).save(f"test_out/{example_part_index}.png")
 
                     target = y[example_part_index:example_part_index+1]
-                    target = target.reshape(img_output_shape,img_output_shape,3)
+                    target = target.reshape(img_output_shape,img_output_shape,3)*255
                     target = target.cpu().int().numpy().astype(np.uint8)
                     Image.fromarray(target).save(f"test_out/{example_part_index}_target.png")
 
@@ -194,7 +203,7 @@ if __name__ == "__main__":
         computed_steps += 1
         if computed_steps % 450 == 0 and total_steps > 2:
             print("saving expoch")
-            old_checkpoints = glob.glob(f"{model_name}_checkpoints/*")
+            old_checkpoints = glob.glob(f"{checkpoint_dir}/*")
             old_checkpoints.sort(key=os.path.getmtime)
             for f in old_checkpoints[:-1]:
                 os.remove(f)
