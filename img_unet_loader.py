@@ -7,14 +7,30 @@ from sentence_transformers import SentenceTransformer
 
 model = SentenceTransformer("nomic-ai/nomic-embed-text-v1", trust_remote_code=True)
 class ImgUnetLoader():
-    def __init__(self, img_dim=3**4, output_patch_dim=9):
+    def __init__(self, img_dim=3**4, output_patch_dim=9, max_examples=None):
         self.img_dim = img_dim
         self.folders = glob('images/*')
+        if max_examples is not None:
+            self.folders = self.folders[:max_examples]
         self.output_patch_dim = output_patch_dim
 
+    def __iter__(self):
+        self.idx = -1
+        return self
+    
     def __len__(self):
         return len(self.folders)
     
+    def __next__(self):
+        while True:
+            self.idx += 1
+            if self.idx >= len(self.folders):
+                raise StopIteration
+            try:
+                return self.__getitem__(self.idx)
+            except Exception as e:
+                print("error", e)
+
     def __getitem__(self, idx):
         folder = self.folders[idx]
         image = Image.open(f"{folder}/image.jpg")
@@ -36,16 +52,17 @@ class ImgUnetLoader():
             for j in range(0, self.img_dim, self.output_patch_dim):
                 inputs.append(random_image.clone())
                 random_image[:, i:i+self.output_patch_dim, j:j+self.output_patch_dim] = image[:, i:i+self.output_patch_dim, j:j+self.output_patch_dim]
-                outputs.append(random_image.clone())
+                outputs.append(random_image[:, i:i+self.output_patch_dim, j:j+self.output_patch_dim])
         inputs = torch.stack(inputs)
         outputs = torch.stack(outputs)
         return inputs, outputs, text_embedding, text
 
 if __name__ == "__main__":
     loader = ImgUnetLoader()
-    for i in range(1):
-        inputs, outputs, text_embedding = loader[i]
-        print(inputs.shape, outputs.shape, text_embedding.shape)
+    i = -1
+    for inputs, outputs, text_embedding, text in loader:
+        i += 1
+        print(i, inputs.shape, outputs.shape, text_embedding.shape)
         # clear test folder
         import os
         os.system("rm -rf input_test")

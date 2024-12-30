@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import os
+import glob
 from img_unet_loader import ImgUnetLoader
+from torch.utils.tensorboard import SummaryWriter
 
 dtype = torch.bfloat16
 device = torch.device("cuda:0")
@@ -112,14 +114,17 @@ class ImgUNet(nn.Module):
             # print(f"After up conv level {i}: {x.shape}")
         # Final output layer
         x = self.final_conv(x)
+        x = F.sigmoid(x)
         # print(f"After final conv: {x.shape}")
         return x
     
 model_name = "img_unet"
 # create output dir
-output_dir = f"output/{model_name}"
+output_dir = f"{model_name}_output"
 import os
 os.makedirs(output_dir, exist_ok=True)
+checkpoint_dir = f"{model_name}_checkpoints"
+os.makedirs(checkpoint_dir, exist_ok=True)
 # clear dir
 for file in os.listdir(output_dir):
     os.remove(os.path.join(output_dir, file))
@@ -137,14 +142,30 @@ if __name__ == "__main__":
 
     model = ImgUNet(in_channels, out_channels, num_levels, num_convs_per_level, base_channels, image_size, text_embedding_dim)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    writer = SummaryWriter(f"runs/{model_name}")
     #print parameter count
     print(f"Parameter count: {sum(p.numel() for p in model.parameters())}")
-
-    data_loader = ImgUnetLoader()
+    # scaler = torch.GradScaler()
+    data_loader = ImgUnetLoader(max_examples=1)
     total_steps = 0
     epoch = 0
-    for epoch in range(epoch, 100):
-        step = 0
+    step = 0
+
+    # load checkpoint
+    checkpoints_sorted = glob.glob(f'{checkpoint_dir}/*.pt')
+    if len(checkpoints_sorted) > 0:
+        checkpoints_sorted.sort(key=os.path.getmtime)
+        print("loading checkpoint", checkpoints_sorted[-1],)
+        checkpoint = torch.load(checkpoints_sorted[-1])
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        epoch = checkpoint['epoch']
+        step = checkpoint['step']
+        total_steps = checkpoint['total_steps']
+        print("loaded checkpoint", checkpoints_sorted[-1], "total steps", total_steps)
+
+
+    for epoch in range(epoch, 5000):
         for inputs, targets, text_embedding, text in data_loader:
             step += 1
             total_steps += 1
@@ -154,14 +175,25 @@ if __name__ == "__main__":
             for i in range(len(inputs)):
                 # text_embedding = torch.from_numpy(text_embedding.reshape(1, text_embedding_embedding_dim))
                 optimizer.zero_grad()
+                # with torch.autocast(device_type='cuda', dtype=torch.float16):
                 output = model(inputs[i:i+1], text_embedding.reshape(1, text_embedding_dim))
+                # loss = F.mse_loss(output, targets[i:i+1])
                 loss = F.mse_loss(output, targets[i:i+1])
                 loss.backward()
                 optimizer.step()
+
+                # scaler.scale(loss).backward()
+                # scaler.unscale_(optimizer)
+                # scaler.step(optimizer)
+                # scaler.update()
+
                 if i % 10 == 0:
-                    print(f"epoch: {epoch}, step: {step}, i: {i}/{inputs.shape[0]}, loss: {loss.item()}, ")
-                if step == 10:
+                    print("output is", output[0, 0, 0, :], output.shape)
+                    print(f"epoch: {epoch}, step: {step}, i: {i}/{inputs.shape[0]}, loss: {loss.item()}, total_steps: {total_steps}")
+                    writer.add_scalar("loss", loss.item(), total_steps)
+                if total_steps % 15 == 0:
                     # save input/output for comparison using pillow
+                    print("saving")
                     import numpy as np
                     input_img = inputs[i].float().cpu().numpy().transpose(1, 2, 0)
                     output_img = output[0].float().cpu().detach().numpy().transpose(1, 2, 0)
@@ -173,6 +205,23 @@ if __name__ == "__main__":
                     # write text
                     with open(f"{output_dir}/{total_steps}_text.txt", "w") as f:
                         f.write(text)
+            
+            if total_steps % 500 == 0 and total_steps > 0:
+                print("saving model!")
+                torch.save({
+                    "total_steps": total_steps,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "step": step,
+                }, f"{checkpoint_dir}/model_{total_steps}.pt")
+                # delete all but last 2
+                checkpoints = os.listdir(checkpoint_dir)
+                checkpoints_sorted = sorted(checkpoints)
+                for checkpoint in checkpoints_sorted[:-2]:
+                    os.remove(f"{checkpoint_dir}/{checkpoint}")
+                print("saved model")
+                # break
 
     # x = torch.randn(batch_size, in_channels, image_size, image_size)
     # text_embedding = torch.randn(batch_size, text_embedding_dim)
