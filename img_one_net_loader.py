@@ -5,6 +5,14 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 from torchvision import transforms
 from transformers import AutoTokenizer, AutoModel
+import datasets as ds
+
+# dataset = ds.load_dataset(
+#     "shunk031/MSCOCO",
+#     year=2017,
+#     coco_task="captions",
+# )
+
 
 class ImageTextDataset(Dataset):
     def __init__(self, root_dir, image_dim, model_name='sentence-transformers/all-MiniLM-L6-v2'):

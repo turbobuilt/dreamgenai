@@ -13,6 +13,7 @@ from img_one_net_loader import create_loader
 from torch.utils.tensorboard import SummaryWriter
 
 import os
+import math
 
 image_dim = 32
 out_convs_length = 3
@@ -32,6 +33,7 @@ class ResidualBlock(nn.Module):
         x = self.norm_2(self.act(self.fc1(x)))
         x = self.act(self.fc2(x))
         return x + r
+    
 
 class ImgOneNet(nn.Module):
     def __init__(self):
@@ -162,4 +164,3 @@ if __name__ == "__main__":
                 excess = len(checkpoints) - 2
                 for old_checkpoint in checkpoints[:excess if excess > 0 else 0]:
                     os.remove(os.path.join(checkpoint_dir, old_checkpoint))
-                
